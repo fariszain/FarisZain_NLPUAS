@@ -6,27 +6,25 @@ venv/
 # python
 __pycache__/
 *.pyc
+*.log
+fastapi.log
 
 # logs
 log/
 *.log
 
-# runtime artifacts
-storage/app/whisper.cpp/
-
-# whisper
+# data & storage
+data/
+storage/
+app/temp/
 app/whisper.cpp/
-
-# storage
-storage/chat_history.json
-storage/rate_state.json
-
-# Audio saja di dalam data
-data/audio/
-
-# Storage dan semua isinya
-storage/**
-
-.github/app/coqui_utils/*.pth
 app/coqui_utils/checkpoint_*.pth
 app/coqui_utils/*.pth
+laporan/*.pdf
+laporan/*.aux
+laporan/*.log
+laporan/*.toc
+laporan/*.lof
+laporan/*.lot
+laporan/*.out
+laporan/*.synctex.gz
