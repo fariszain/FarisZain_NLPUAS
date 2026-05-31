@@ -12,109 +12,131 @@ except ImportError:
 try:
     from processing import preprocess_audio
 except ImportError:
-    project_root = Path(__file__).resolve().parents[1]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    akar_proyek = Path(__file__).resolve().parents[1]
+    if str(akar_proyek) not in sys.path:
+        sys.path.insert(0, str(akar_proyek))
     from processing import preprocess_audio
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
+LOKASI_BASE = os.path.dirname(os.path.abspath(__file__))
+AKAR_PROYEK = os.path.dirname(LOKASI_BASE)
 
-_env_whisper_dir = os.getenv("WHISPER_DIR")
-if _env_whisper_dir:
-    WHISPER_DIR = _env_whisper_dir
+env_whisper_dir = os.getenv("WHISPER_DIR")
+if env_whisper_dir:
+    DIREKTORI_WHISPER = env_whisper_dir
 else:
-    # prefer app/whisper.cpp when present in this repo layout, fallback to models/whisper.cpp
-    cand_app = os.path.join(PROJECT_ROOT, "app", "whisper.cpp")
-    cand_models = os.path.join(PROJECT_ROOT, "models", "whisper.cpp")
-    if os.path.exists(cand_app):
-        WHISPER_DIR = cand_app
-    else:
-        WHISPER_DIR = cand_models
-WHISPER_BINARY = os.getenv("WHISPER_BINARY", os.path.join(WHISPER_DIR, "build", "bin", "whisper-cli"))
-WHISPER_MODEL_PATH = os.getenv("WHISPER_MODEL_PATH")
-if not WHISPER_MODEL_PATH:
-    # Prefer common model filenames if present (base first), fallback to large-v3-turbo
-    candidates = [
-        os.path.join(WHISPER_DIR, "models", "ggml-base.bin"),
-        os.path.join(WHISPER_DIR, "models", "ggml-base.en.bin"),
-        os.path.join(WHISPER_DIR, "models", "ggml-large-v3-turbo.bin"),
+    candi_app = os.path.join(AKAR_PROYEK, "app", "whisper.cpp")
+    candi_models = os.path.join(AKAR_PROYEK, "models", "whisper.cpp")
+    DIREKTORI_WHISPER = candi_app if os.path.exists(candi_app) else candi_models
+
+BINER_WHISPER = os.getenv("WHISPER_BINARY", os.path.join(DIREKTORI_WHISPER, "build", "bin", "whisper-cli"))
+PATH_MODEL_WHISPER = os.getenv("WHISPER_MODEL_PATH")
+if not PATH_MODEL_WHISPER:
+    kandidat_model = [
+        os.path.join(DIREKTORI_WHISPER, "models", "ggml-base.bin"),
+        os.path.join(DIREKTORI_WHISPER, "models", "ggml-base.en.bin"),
+        os.path.join(DIREKTORI_WHISPER, "models", "ggml-large-v3-turbo.bin"),
     ]
-    for cand in candidates:
-        if os.path.exists(cand):
-            WHISPER_MODEL_PATH = cand
+    for km in kandidat_model:
+        if os.path.exists(km):
+            PATH_MODEL_WHISPER = km
             break
     else:
-        WHISPER_MODEL_PATH = os.path.join(WHISPER_DIR, "models", "ggml-large-v3-turbo.bin")
-WHISPER_TIMEOUT = int(os.getenv("WHISPER_TIMEOUT", "180"))
+        PATH_MODEL_WHISPER = os.path.join(DIREKTORI_WHISPER, "models", "ggml-large-v3-turbo.bin")
 
-if os.name == "nt" and not WHISPER_BINARY.endswith(".exe"):
-    WHISPER_BINARY += ".exe"
+TIMEOUT_WHISPER = int(os.getenv("WHISPER_TIMEOUT", "180"))
+
+if os.name == "nt" and not BINER_WHISPER.endswith(".exe"):
+    BINER_WHISPER += ".exe"
+
+pipeline_asr_lokal = None
 
 
-def _validate_whisper_paths() -> None:
-    if not os.path.exists(WHISPER_BINARY):
-        raise FileNotFoundError(f"Binary whisper-cli tidak ditemukan: {WHISPER_BINARY}")
-    if not os.path.exists(WHISPER_MODEL_PATH):
-        raise FileNotFoundError(f"Model Whisper tidak ditemukan: {WHISPER_MODEL_PATH}")
+def inisialisasi_pipeline_asr():
+    """Menginisialisasi pipeline otomatis speech recognition Hugging Face."""
+    global pipeline_asr_lokal
+    if pipeline_asr_lokal is None:
+        print("[ASR-INFO] Memuat pipeline Whisper Small dari Hugging Face...")
+        try:
+            import torch
+            from transformers import pipeline
+            penggunaan_device = 0 if torch.cuda.is_available() else -1
+            pipeline_asr_lokal = pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-small",
+                device=penggunaan_device,
+                chunk_length_s=30,
+                return_timestamps=False
+            )
+            print("[ASR-INFO] Pipeline ASR Hugging Face siap digunakan.")
+        except Exception as error:
+            print(f"[ASR-ERROR] Gagal memuat pipeline ASR: {error}")
+            raise error
+    return pipeline_asr_lokal
 
 
 def transcribe_audio_file(audio_path: str) -> str:
-    """Transkrip audio dari path file menggunakan whisper.cpp CLI."""
-    _validate_whisper_paths()
-
-    output_base = os.path.join(TEMP_DIR, f"transcription_{uuid.uuid4()}")
-    output_txt = f"{output_base}.txt"
-    preprocessed_path = None
+    """Mentranskripsikan berkas audio menggunakan whisper.cpp atau fallback Hugging Face."""
+    prefix_temp = os.path.join(TEMP_DIR, f"stt_{uuid.uuid4()}")
+    path_hasil_txt = f"{prefix_temp}.txt"
+    path_prep = None
 
     try:
-        processed = preprocess_audio(audio_path, output_dir=TEMP_DIR)
-        if processed.status == "success":
-            preprocessed_path = processed.output_path
-            audio_input = preprocessed_path
+        data_prep = preprocess_audio(audio_path, output_dir=TEMP_DIR)
+        input_audio = data_prep.output_path if data_prep.status == "success" else audio_path
+        path_prep = data_prep.output_path if data_prep.status == "success" else None
+
+        # Cek ketersediaan biner whisper.cpp
+        if os.path.exists(BINER_WHISPER) and os.access(BINER_WHISPER, os.X_OK) and os.path.exists(PATH_MODEL_WHISPER):
+            cmd = [
+                BINER_WHISPER,
+                "-m", PATH_MODEL_WHISPER,
+                "-l", "auto",
+                "-f", input_audio,
+                "-otxt",
+                "-of", prefix_temp,
+            ]
+            try:
+                hasil = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=TIMEOUT_WHISPER,
+                )
+                if hasil.stderr:
+                    print(hasil.stderr)
+            except subprocess.TimeoutExpired:
+                return "[ERROR] Batas waktu transkripsi whisper.cpp habis."
+            except subprocess.CalledProcessError as error:
+                return f"[ERROR] Eksekusi whisper.cpp gagal: {error.stderr or error}"
+
+            try:
+                with open(path_hasil_txt, "r", encoding="utf-8") as f:
+                    return normalize_text(f.read())
+            except FileNotFoundError:
+                return "[ERROR] File hasil transkripsi tidak terbentuk."
         else:
-            audio_input = audio_path
-
-        cmd = [
-            WHISPER_BINARY,
-            "-m", WHISPER_MODEL_PATH,
-            "-l", "auto",
-            "-f", audio_input,
-            "-otxt",
-            "-of", output_base,
-        ]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=WHISPER_TIMEOUT,
-            )
-            if result.stderr:
-                print(result.stderr)
-        except subprocess.TimeoutExpired:
-            return "[ERROR] Whisper timeout. Audio terlalu panjang atau model terlalu berat."
-        except subprocess.CalledProcessError as exc:
-            return f"[ERROR] Whisper failed: {exc.stderr or exc}"
-
-        try:
-            with open(output_txt, "r", encoding="utf-8") as file:
-                return normalize_text(file.read())
-        except FileNotFoundError:
-            return "[ERROR] File hasil transkripsi tidak ditemukan."
+            # Fallback ke pipeline lokal Hugging Face
+            print("[ASR-INFO] Biner whisper.cpp tidak ditemukan. Menggunakan Hugging Face Pipeline...")
+            try:
+                import librosa
+                audio_np, sr = librosa.load(input_audio, sr=16000)
+                pipe = inisialisasi_pipeline_asr()
+                hasil = pipe(audio_np)
+                return normalize_text(hasil["text"])
+            except Exception as error:
+                return f"[ERROR] Gagal memproses fallback ASR: {str(error)}"
     finally:
-        safe_delete(output_txt)
-        safe_delete(preprocessed_path)
+        safe_delete(path_hasil_txt)
+        safe_delete(path_prep)
 
 
 def transcribe_speech_to_text(file_bytes: bytes, file_ext: str = ".wav") -> str:
-    """Simpan bytes audio sementara, transkrip, lalu bersihkan file upload."""
-    audio_path = os.path.join(TEMP_DIR, f"upload_{uuid.uuid4()}{file_ext}")
+    """Mengubah byte data audio mentah menjadi string teks transkripsi."""
+    berkas_sementara = os.path.join(TEMP_DIR, f"raw_{uuid.uuid4()}{file_ext}")
     try:
-        with open(audio_path, "wb") as file:
-            file.write(file_bytes)
-        return transcribe_audio_file(audio_path)
+        with open(berkas_sementara, "wb") as f:
+            f.write(file_bytes)
+        return transcribe_audio_file(berkas_sementara)
     finally:
-        safe_delete(audio_path)
+        safe_delete(berkas_sementara)

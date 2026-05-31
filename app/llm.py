@@ -8,34 +8,55 @@ from typing import Any
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from pydantic import TypeAdapter
 
 try:
     from .utils import normalize_text
 except ImportError:
     from utils import normalize_text
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-DOTENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(DOTENV_PATH, override=True)
+LOKASI_BASE = os.path.dirname(os.path.abspath(__file__))
+DIREKTORI_PROYEK = os.path.dirname(LOKASI_BASE)
+PATH_DOTENV = os.path.join(DIREKTORI_PROYEK, ".env")
+load_dotenv(PATH_DOTENV, override=True)
 
-STORAGE_DIR = os.path.join(PROJECT_ROOT, "storage")
-os.makedirs(STORAGE_DIR, exist_ok=True)
-CHAT_HISTORY_FILE = os.path.join(STORAGE_DIR, "chat_history.json")
-RATE_STATE_FILE = os.path.join(STORAGE_DIR, "rate_state.json")
+DIREKTORI_KONTROL = os.path.join(DIREKTORI_PROYEK, "storage")
+os.makedirs(DIREKTORI_KONTROL, exist_ok=True)
+FILE_RIWAYAT_CHAT = os.path.join(DIREKTORI_KONTROL, "chat_history.json")
+FILE_BATAS_KONTROL = os.path.join(DIREKTORI_KONTROL, "rate_state.json")
 
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it")
-RPM_LIMIT = int(os.getenv("GEMINI_RPM_LIMIT", "10"))
-RPD_LIMIT = int(os.getenv("GEMINI_RPD_LIMIT", "1000"))
-REQUEST_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "60"))
-MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+NAMA_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+BATAS_RPM = int(os.getenv("GEMINI_RPM_LIMIT", "15"))
+BATAS_RPD = int(os.getenv("GEMINI_RPD_LIMIT", "4500"))
+BATAS_WAKTU_REQ = int(os.getenv("GEMINI_TIMEOUT", "60"))
+MAKSIMAL_PERCOBAAN = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
 
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY belum ditemukan. Buat file .env di root project.")
+# Pengolahan daftar kunci API
+DAFTAR_KUNCI_API = []
+kunci_raw = os.getenv("GEMINI_API_KEYS", "")
+if kunci_raw:
+    DAFTAR_KUNCI_API = [k.strip() for k in kunci_raw.split(",") if k.strip()]
+if not DAFTAR_KUNCI_API:
+    kunci_tunggal = os.getenv("GEMINI_API_KEY")
+    if kunci_tunggal:
+        DAFTAR_KUNCI_API = [kunci_tunggal]
 
-system_instruction = """
+if not DAFTAR_KUNCI_API:
+    raise RuntimeError("Kunci API Gemini tidak ditemukan di .env!")
+
+indeks_kunci_sekarang = 0
+
+
+def dapatkan_klien_aktif() -> genai.Client:
+    """Mengembalikan objek klien GenAI dengan API key yang aktif."""
+    global indeks_kunci_sekarang
+    kunci_aktif = DAFTAR_KUNCI_API[indeks_kunci_sekarang % len(DAFTAR_KUNCI_API)]
+    return genai.Client(
+        api_key=kunci_aktif,
+        http_options=types.HttpOptions(timeout=BATAS_WAKTU_REQ * 1000)
+    )
+
+
+INSTRUKSI_SISTEM = """
 You are a direct conversational virtual assistant.
 Task: Answer the user's question immediately.
 
@@ -45,211 +66,134 @@ STRICT RULES:
 3. Maximum 2-3 sentences.
 """.strip()
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
-
-chat_config = types.GenerateContentConfig(
-    system_instruction=system_instruction,
+konfigurasi_chat = types.GenerateContentConfig(
+    system_instruction=INSTRUKSI_SISTEM,
     temperature=0.3,
     max_output_tokens=1024,
-    http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT * 1000),
 )
 
-history_adapter = TypeAdapter(list[types.Content])
 
-
-def _read_json(path: str, default: Any) -> Any:
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return default
+def baca_data_json(jalur_file: str, nilai_default: Any) -> Any:
+    """Membaca berkas JSON dengan aman."""
+    if not os.path.exists(jalur_file) or os.path.getsize(jalur_file) == 0:
+        return nilai_default
     try:
-        with open(path, "r", encoding="utf-8") as file:
-            return json.load(file)
+        with open(jalur_file, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return default
+        return nilai_default
 
 
-def _write_json(path: str, data: Any) -> None:
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
+def tulis_data_json(jalur_file: str, data_simpan: Any) -> None:
+    """Menulis data ke berkas JSON."""
+    with open(jalur_file, "w", encoding="utf-8") as f:
+        json.dump(data_simpan, f, ensure_ascii=False, indent=2)
 
 
-def _wait_for_rate_limit() -> None:
-    """Pembatas sederhana agar tidak melebihi RPM dan RPD lokal."""
-    now = time.time()
-    today = date.today().isoformat()
-    state = _read_json(RATE_STATE_FILE, {"date": today, "daily_count": 0, "timestamps": []})
+def batasi_rate_limit_lokal() -> None:
+    """Fungsi pencegah request berlebih agar tidak melampaui RPM/RPD."""
+    waktu_sekarang = time.time()
+    tanggal_hari_ini = date.today().isoformat()
+    status_limit = baca_data_json(FILE_BATAS_KONTROL, {"date": tanggal_hari_ini, "daily_count": 0, "timestamps": []})
 
-    if state.get("date") != today:
-        state = {"date": today, "daily_count": 0, "timestamps": []}
+    if status_limit.get("date") != tanggal_hari_ini:
+        status_limit = {"date": tanggal_hari_ini, "daily_count": 0, "timestamps": []}
 
-    if state.get("daily_count", 0) >= RPD_LIMIT:
-        raise RuntimeError(f"RPD lokal tercapai ({RPD_LIMIT}). Coba lagi besok atau naikkan limit di .env.")
+    if status_limit.get("daily_count", 0) >= BATAS_RPD:
+        raise RuntimeError(f"Batas harian RPD tercapai ({BATAS_RPD}).")
 
-    timestamps = [t for t in state.get("timestamps", []) if now - float(t) < 60]
-    if len(timestamps) >= RPM_LIMIT:
-        sleep_time = 60 - (now - min(timestamps)) + 1
-        print(f"[INFO] RPM lokal tercapai. Sleep {sleep_time:.1f} detik...")
-        time.sleep(max(1, sleep_time))
-        now = time.time()
-        timestamps = [t for t in timestamps if now - float(t) < 60]
+    list_timestamp = [t for t in status_limit.get("timestamps", []) if waktu_sekarang - float(t) < 60]
+    if len(list_timestamp) >= BATAS_RPM:
+        durasi_tunggu = 60 - (waktu_sekarang - min(list_timestamp)) + 1
+        print(f"[INFO-LLM] Batas RPM tercapai. Menunggu {durasi_tunggu:.1f} detik...")
+        time.sleep(max(1, durasi_tunggu))
+        waktu_sekarang = time.time()
+        list_timestamp = [t for t in list_timestamp if waktu_sekarang - float(t) < 60]
 
-    timestamps.append(now)
-    state["timestamps"] = timestamps
-    state["daily_count"] = state.get("daily_count", 0) + 1
-    _write_json(RATE_STATE_FILE, state)
-
-
-def _extract_retry_delay_seconds(error: Exception) -> int:
-    message = str(error)
-    match = re.search(r"retry in ([0-9.]+)s", message, re.IGNORECASE)
-    if match:
-        return max(1, int(float(match.group(1))) + 1)
-    if "429" in message or "quota" in message.lower() or "rate" in message.lower():
-        return 60
-    return 5
-
-
-def export_chat_history(chat) -> str:
-    return history_adapter.dump_json(chat.get_history()).decode("utf-8")
-
-
-def save_chat_history(chat) -> None:
-    with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as file:
-        file.write(export_chat_history(chat))
-
-
-def load_chat_history():
-    if not os.path.exists(CHAT_HISTORY_FILE) or os.path.getsize(CHAT_HISTORY_FILE) == 0:
-        return client.chats.create(model=MODEL, config=chat_config)
-
-    try:
-        with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as file:
-            json_str = file.read().strip()
-        if not json_str:
-            return client.chats.create(model=MODEL, config=chat_config)
-        history = history_adapter.validate_json(json_str)
-        return client.chats.create(model=MODEL, config=chat_config, history=history)
-    except Exception as exc:
-        print(f"[ERROR] Gagal load history chat: {exc}")
-        return client.chats.create(model=MODEL, config=chat_config)
+    list_timestamp.append(waktu_sekarang)
+    status_limit["timestamps"] = list_timestamp
+    status_limit["daily_count"] = status_limit.get("daily_count", 0) + 1
+    tulis_data_json(FILE_BATAS_KONTROL, status_limit)
 
 
 def generate_response(prompt: str) -> str:
-    normalized_prompt = normalize_text(prompt)
-    if not normalized_prompt:
-        return "Maaf, saya belum menerima teks yang jelas dari audio."
+    """Mengirim prompt teks ke Gemini API dan merapikan output responsnya."""
+    global indeks_kunci_sekarang
+    prompt_bersih = normalize_text(prompt)
+    if not prompt_bersih:
+        return "Maaf, pesan input tidak terdeteksi dengan jelas."
 
-    last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    kesalahan_terakhir = None
+    for percobaan in range(1, len(DAFTAR_KUNCI_API) + 1):
         try:
-            _wait_for_rate_limit()
-            print(f"[DEBUG-LLM] Attempt {attempt}/{MAX_RETRIES}: Sending to Gemini API (Stateless)...")
+            batasi_rate_limit_lokal()
+            klien = dapatkan_klien_aktif()
+            print(f"[LLM-DEBUG] Kunci #{indeks_kunci_sekarang + 1} | Kirim ke: {NAMA_MODEL}...")
             
-            # Eksekusi secara stateless via generate_content agar ingatan audio terbilas sempurna
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=normalized_prompt,
-                config=chat_config
+            respons_raw = klien.models.generate_content(
+                model=NAMA_MODEL,
+                contents=prompt_bersih,
+                config=konfigurasi_chat
             )
-            print(f"[DEBUG-LLM] API returned response object: {type(response)}")
             
-            resp_text = None
-            
-            # Path 1: Direct response.text
-            if hasattr(response, 'text') and response.text:
-                resp_text = response.text
-                print(f"[DEBUG-LLM] [PATH-1] Got text from response.text: '{resp_text[:100]}'")
-            
-            # Path 2: response.candidates[0].content.parts[0].text
-            elif hasattr(response, 'candidates') and response.candidates:
+            teks_jawaban = None
+            if hasattr(respons_raw, 'text') and respons_raw.text:
+                teks_jawaban = respons_raw.text
+            elif hasattr(respons_raw, 'candidates') and respons_raw.candidates:
                 try:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                        if candidate.content.parts:
-                            part = candidate.content.parts[0]
-                            if hasattr(part, 'text') and part.text:
-                                resp_text = part.text
-                                print(f"[DEBUG-LLM] [PATH-2] Got text from candidates[0].content.parts[0].text: '{resp_text[:100]}'")
-                except (IndexError, AttributeError) as e:
-                    print(f"[DEBUG-LLM] [PATH-2] Failed to extract: {e}")
+                    kandidat = respons_raw.candidates[0]
+                    if hasattr(kandidat, 'content') and hasattr(kandidat.content, 'parts'):
+                        if kandidat.content.parts:
+                            part_data = kandidat.content.parts[0]
+                            if hasattr(part_data, 'text') and part_data.text:
+                                teks_jawaban = part_data.text
+                except Exception as exc_candidate:
+                    print(f"[LLM-WARN] Gagal parse kandidat: {exc_candidate}")
             
-            # Path 3: Check finish_reason for blocks
-            if not resp_text and hasattr(response, 'candidates'):
-                try:
-                    candidate = response.candidates[0]
-                    finish_reason = candidate.finish_reason if hasattr(candidate, 'finish_reason') else None
-                    print(f"[DEBUG-LLM] [PATH-3] Response blocked? finish_reason={finish_reason}")
-                    if hasattr(candidate, 'safety_ratings'):
-                        print(f"[DEBUG-LLM] [PATH-3] safety_ratings: {candidate.safety_ratings}")
-                except Exception as e:
-                    print(f"[DEBUG-LLM] [PATH-3] Error checking finish_reason: {e}")
-            
-            if resp_text and resp_text.strip():
-                # ========================================================
-                # PIPELINE PEMBERSIHAN
-                # ========================================================
-                
-                # 1. Bersihkan karakter markdown pengganggu
-                resp_text = resp_text.replace("*", "").replace("#", "").replace('"', '').replace('(', '').replace(')', '')
-                
-                # 2. PECAH PER BARIS & CEK JAWABAN DARI BAWAH (BOTTOM-UP FILTER)
-                lines = [line.strip() for line in resp_text.split('\n') if line.strip()]
-                
-                final_answer = ""
-                # Kita periksa baris dari urutan paling bawah (paling akhir)
-                for line in reversed(lines):
-                    line_lower = line.lower()
-                    
-                    # Abaikan baris jika mengandung tanda titik dua pembuka log/draf (seperti 'Option satu:', 'Context:', dll)
-                    # ATAU mengandung kata kunci draf yang sudah kita ketahui
-                    if ":" in line or any(x in line_lower for x in [
+            if teks_jawaban and teks_jawaban.strip():
+                # Membersihkan karakter khusus markdown dan tanda baca berlebih
+                teks_jawaban = teks_jawaban.replace("*", "").replace("#", "").replace('"', '').replace('(', '').replace(')', '')
+                baris_data = [b.strip() for b in teks_jawaban.split('\n') if b.strip()]
+                teks_final = ""
+                for baris in reversed(baris_data):
+                    b_lower = baris.lower()
+                    if ":" in baris or any(x in b_lower for x in [
                         'user input', 'intent', 'goal', 'constraints', 'language', 
                         'draft', 'refining', 'self-correction', 'user asks', 
                         'option', 'direct?', 'no analysis', 'polite/clear', 'context', 'translation'
                     ]):
                         continue
-                    
-                    # Baris pertama yang bersih dari bawah adalah JAWABAN ASLI yang kita cari
-                    final_answer = line
+                    teks_final = baris
                     break
                 
-                # Fallback jika semua baris ternyata tercemar log (sangat jarang terjadi)
-                if not final_answer and lines:
-                    final_answer = lines[-1]
+                if not teks_final and baris_data:
+                    teks_final = baris_data[-1]
+                teks_jawaban = teks_final
                 
-                resp_text = final_answer
-                
-                # ========================================================
-                # PENANGANAN KALIMAT GANTUNG (ANTI-TRUNCATION)
-                # ========================================================
-                if resp_text:
-                    # Cari tanda baca akhir terakhir (. atau ? atau !)
-                    last_punctuation_index = max(
-                        resp_text.rfind('.'), 
-                        resp_text.rfind('?'), 
-                        resp_text.rfind('!')
-                    )
-                    # Jika ada tanda baca ditemukan, potong teks tepat di tanda baca tersebut
-                    if last_punctuation_index != -1:
-                        resp_text = resp_text[:last_punctuation_index + 1].strip()
+                if teks_jawaban:
+                    idx_punc = max(teks_jawaban.rfind('.'), teks_jawaban.rfind('?'), teks_jawaban.rfind('!'))
+                    if idx_punc != -1:
+                        teks_jawaban = teks_jawaban[:idx_punc + 1].strip()
 
-                # ========================================================
-
-                normalized = normalize_text(resp_text)
-                print(f"[DEBUG-LLM] After clean & normalize_text: '{normalized[:100]}'")
-                return normalized
+                return normalize_text(teks_jawaban)
             else:
-                print(f"[DEBUG-LLM] response.text is None/empty, will retry...")
+                raise RuntimeError("Respons dari model kosong.")
                 
-        except Exception as exc:
-            last_error = exc
-            delay = _extract_retry_delay_seconds(exc)
-            print(f"[WARNING] Gemini gagal attempt {attempt}/{MAX_RETRIES}: {exc}")
-            import traceback
-            traceback.print_exc()
-            if attempt < MAX_RETRIES:
-                time.sleep(delay)
+        except Exception as error:
+            kesalahan_terakhir = error
+            pesan_error = str(error).lower()
+            is_limit = any(k in pesan_error or k in type(error).__name__.lower() for k in ["429", "resource_exhausted", "quota", "rate"])
+            
+            if is_limit:
+                indeks_lama = indeks_kunci_sekarang
+                indeks_kunci_sekarang = (indeks_kunci_sekarang + 1) % len(DAFTAR_KUNCI_API)
+                print(f"[LLM-ROTATE] Kunci #{indeks_lama + 1} limit. Beralih ke #{indeks_kunci_sekarang + 1}...")
+                time.sleep(1)
+                continue
+            else:
+                print(f"[LLM-WARN] Percobaan ke-{percobaan} gagal: {error}")
+                indeks_kunci_sekarang = (indeks_kunci_sekarang + 1) % len(DAFTAR_KUNCI_API)
+                time.sleep(1)
 
-    # Fallback response jika semua attempt gagal atau kosong
-    fallback = f"Maaf, saya tidak bisa memproses permintaan Anda saat ini."
-    print(f"[DEBUG-LLM] All attempts exhausted, returning fallback: '{fallback}'")
-    return fallback
+    print(f"[LLM-ERROR] Semua kunci API habis/gagal. Detail: {kesalahan_terakhir}")
+    return "Maaf, layanan chatbot sedang mengalami kepadatan trafik. Silakan coba kembali."

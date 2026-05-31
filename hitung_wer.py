@@ -32,10 +32,10 @@ for index, row in df.iterrows():
     if "failed" in status.lower() or not hypothesis:
         continue
         
-    # Cari pola "audio" diikuti angka di dalam nama file (misal: 2336_audio1.wav -> audio1)
-    match = re.search(r"audio\d+", filename)
+    # Cari pola "audio" diikuti angka di dalam nama file (misal: 2336_audio1.wav -> audio01)
+    match = re.search(r"audio(\d+)", filename)
     if match:
-        matched_key = match.group(0) # Ambil string 'audio1', 'audio12', dst.
+        matched_key = f"audio{match.group(1).zfill(2)}" # Ambil string 'audio01', 'audio12', dst.
         
         if matched_key in ground_truth:
             reference = ground_truth[matched_key]

@@ -1,10 +1,3 @@
-"""analisis_pipeline.py
-
-Batch pipeline untuk transkripsi + ringkasan audio + Evaluasi Akurasi Instan (WER & CER).
-Menggunakan modul 'bersihkan_data' untuk menyaring file corrupt, duplikat (1),
-dan salah penamaan sebelum evaluasi dimulai, serta mendukung fitur Checkpoint.
-"""
-
 import os
 import re
 import shutil
@@ -288,7 +281,11 @@ def _save_progress_to_csv(hasil_analisis, out_csv):
 
 if __name__ == "__main__":
     try:
-        # Jalankan langsung dengan parameter folder audio dan prefix NPM kamu
-        jalankan_uji_korpus("data/audio")
+        if os.path.exists(os.path.join("data", "corpus")):
+            folder = os.path.join("data", "corpus")
+        else:
+            folder = os.path.join("data", "audio")
+        # Jalankan langsung dengan parameter folder audio tanpa filter prefix NPM agar memproses seluruh korpus
+        jalankan_uji_korpus(folder, student_prefix=None)
     except Exception as exc:
         print(f"Error: {exc}")

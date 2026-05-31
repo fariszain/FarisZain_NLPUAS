@@ -1,10 +1,3 @@
-"""bersihkan_data.py
-
-Modul khusus hasil adaptasi pipeline repositori korpus untuk membersihkan data,
-menghilangkan duplikat file buntu (1), melakukan penyeragaman padding angka (zfill),
-dan menyeleksi ukuran file terbesar jika terjadi redundansi data biner.
-"""
-
 import os
 import re
 from pathlib import Path
@@ -112,7 +105,10 @@ def saring_dan_ambil_data_bersih(corpus_dir: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    FOLDER_TARGET = os.path.join("data", "audio")
-    print("=== MEMULAI PENYARINGAN DATA KORPUS ===")
+    if os.path.exists(os.path.join("data", "corpus")):
+        FOLDER_TARGET = os.path.join("data", "corpus")
+    else:
+        FOLDER_TARGET = os.path.join("data", "audio")
+    print(f"=== MEMULAI PENYARINGAN DATA KORPUS (Folder: {FOLDER_TARGET}) ===")
     data_siap_pakai = saring_dan_ambil_data_bersih(FOLDER_TARGET)
     print(f"\n[INFO] Total data unik & bersih yang siap dimasukkan ke pipeline kamu: {len(data_siap_pakai)} file.")
